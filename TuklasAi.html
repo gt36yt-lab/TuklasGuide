@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, minimal-ui">
+    <meta name="theme-color" content="#000000">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Tuklas Guide v2.5 | Loading Feedback</title>
+    
+    <link rel="manifest" href="data:application/manifest+json;base64,eyJuYW1lIjoiVHVrbGFzIEd1aWRlIiwic2hvcnRfbmFtZSI6IlR1a2xhcyIsInN0YXJ0X3VybCI6Ii4iLCJkaXNwbGF5Ijoic3RhbmRhbG9uZSIsImJhY2tncm91bmRfY29sb3IiOiIjMDAwMDAwIiwidGhlbWVfY29sb3IiOiIjMDAwMDAwIiwiaWNvbnMiOlt7InNyYyI6Imh0dHBzOi8vY2RuLmpzZGVsaXZyLm5ldC9naC90ZW5zb3JmbG93L3RmanMtbW9kZWxzL2ltYWdlcy9jb2NvLXNzZC5qcGciLCJzaXplcyI6IjE5MngxOTIiLCJ0eXBlIjoiaW1hZ2UvanBlZyJ9XX0=">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=VT323&display=swap" rel="stylesheet">
+    
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+    <style>
+        body {
+            margin: 0; padding: 0; background-color: #000; color: #00ff41;
+            font-family: 'Share Tech Mono', monospace; overflow: hidden;
+            height: 100vh; width: 100vw; user-select: none; 
+            -webkit-touch-callout: none; touch-action: none; 
+        }
+        .scanline {
+            width: 100%; height: 4px; background: rgba(0, 255, 65, 0.2);
+            position: absolute; z-index: 50; animation: scan 4s linear infinite; pointer-events: none;
+        }
+        @keyframes scan { 0% { top: 0%; opacity: 0; } 100% { top: 100%; opacity: 0; } }
+        .hud-box { border: 1px solid #00ff41; background: rgba(0, 20, 0, 0.8); }
+        
+        #video-feed, #remote-feed {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            z-index: 0; object-fit: cover; display: none; 
+        }
+        
+        #canvas-overlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10;
+        }
+        #stealth-layer {
+            position: fixed; inset: 0; z-index: 60; background-color: black; display: none; 
+        }
+        
+        /* LAYER ARCHITECTURE */
+        #visual-layer { position: absolute; inset: 0; z-index: 40; pointer-events: none; }
+        #touch-layer { position: fixed; inset: 0; z-index: 200; }
+        #interaction-layer { position: absolute; inset: 0; z-index: 210; pointer-events: none; }
+        .interactive { pointer-events: auto; }
+
+        .ip-input {
+            background: rgba(0, 20, 0, 0.9); border: 1px solid #00ff41;
+            color: #00ff45; font-family: 'Share Tech Mono'; text-align: center;
+            outline: none; padding: 8px; width: 180px;
+        }
+        ::placeholder { color: rgba(0, 255, 65, 0.4); }
+
+        /* PROGRESS BAR STYLES */
+        #progress-container {
+            width: 250px;
+            height: 20px;
+            border: 2px solid #00ff41;
+            padding: 2px;
+            background: rgba(0, 20, 0, 0.9);
+            margin-top: 15px;
+            display: none; /* Hidden until boot starts */
+        }
+        #progress-fill {
+            height: 100%;
+            width: 0%;
+            background-color: #00ff41;
+            transition: width 0.3s ease-out;
+            box-shadow: 0 0 10px rgba(0, 255, 65, 0.5);
+        }
+        #progress-text {
+            font-size: 10px;
+            text-align: center;
+            margin-top: 5px;
+            color: #00ff41;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="video-feed" autoplay playsinline muted></video>
+    <img id="remote-feed" crossorigin="anonymous">
+    <canvas id="canvas-overlay"></canvas>
+    <div class="scanline"></div>
+    <div id="stealth-layer"></div>
+
+    <!-- LAYER 1: NON-INTERACTIVE VISUALS -->
+    <div id="visual-layer" class="p-4 flex flex-col justify-between">
+        <div class="flex justify-between items-start">
+            <div class="hud-box px-3 py-1">
+                <span class="font-bold text-sm">TUKLAS GUIDE v2.5</span>
+            </div>
+            <div id="mode-indicator" class="hud-box px-2 py-1 text-xs animate-pulse">STANDBY</div>
+        </div>
+
+        <div class="hud-box p-2 w-full max-w-md bg-black/80 self-center">
+            <div id="console-log" class="font-mono text-xs h-24 overflow-y-auto opacity-80">
+                > System Ready.<br>> Awaiting command.
+            </div>
+        </div>
+    </div>
+
+    <!-- LAYER 2: TOUCH GESTURES (Z-200) -->
+    <div id="touch-layer"></div>
+
+    <!-- LAYER 3: INTERACTIVE CONTROLS (Z-210) -->
+    <div id="interaction-layer" class="p-4 flex flex-col justify-between">
+        
+        <!-- Top Left Admin Button -->
+        <div id="admin-panel" class="mt-8 interactive self-start">
+             <button onclick="triggerPurgeManual()" class="bg-red-900/80 border border-red-500 text-red-100 text-[10px] px-2 py-1 rounded hover:bg-red-700 transition-colors cursor-pointer font-bold tracking-widest shadow-lg">
+                [ADMIN: PURGE]
+            </button>
+        </div>
+
+        <!-- Centered Start Screen -->
+        <div id="start-screen" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-full text-center transition-opacity duration-500">
+            <div id="main-banner" class="bg-black/80 border border-green-500 px-6 py-4 text-4xl tracking-widest text-white inline-block font-[VT323] interactive">
+                SYSTEM READY
+            </div>
+            
+            <!-- Controls Group -->
+            <div id="controls-group" class="mt-4 flex flex-col items-center gap-3 interactive">
+                <div class="flex gap-2 justify-center">
+                    <input type="text" id="esp-ip" class="ip-input" placeholder="ESP32 IP (Optional)">
+                    <button onclick="startWithIP()" class="bg-green-900/80 border border-green-500 text-green-100 px-3 py-1 hover:bg-green-700 font-bold">GO</button>
+                </div>
+                <span class="text-sm bg-black/80 px-3 py-1 text-green-400 border border-green-900 rounded animate-pulse">
+                    OR Double Tap Background
+                </span>
+            </div>
+
+            <!-- Loading Bar Group -->
+            <div id="loading-group" class="flex flex-col items-center" style="display: none;">
+                <div id="progress-container">
+                    <div id="progress-fill"></div>
+                </div>
+                <div id="progress-text" class="bg-black/80 px-2 mt-1">INITIALIZING...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const SPEECH_RATE = 1.3; 
+        const SPEECH_PITCH = 1.0; 
+        const AUTO_ANNOUNCE_INTERVAL = 1800; 
+        const DETECTION_THRESHOLD = 0.50; 
+        const MODEL_BASE = 'mobilenet_v2';
+        const APP_NAME_PHONETIC = "Took Class Guide"; 
+        const STORAGE_KEY_IP = 'tuklas_esp_ip';
+        const LOCAL_MODEL_URL = 'indexeddb://tuklas-vision-v1';
+        
+        // --- ELEMENTS ---
+        const video = document.getElementById('video-feed');
+        const remoteImg = document.getElementById('remote-feed');
+        const canvas = document.getElementById('canvas-overlay');
+        const ctx = canvas.getContext('2d');
+        const startScreen = document.getElementById('start-screen');
+        const controlsGroup = document.getElementById('controls-group');
+        const loadingGroup = document.getElementById('loading-group');
+        const progressFill = document.getElementById('progress-fill');
+        const progressText = document.getElementById('progress-text');
+        const mainBanner = document.getElementById('main-banner');
+        const consoleLog = document.getElementById('console-log');
+        const touchLayer = document.getElementById('touch-layer');
+        const modeIndicator = document.getElementById('mode-indicator');
+        const stealthLayer = document.getElementById('stealth-layer');
+        const ipInput = document.getElementById('esp-ip');
+        const adminPanel = document.getElementById('admin-panel'); 
+
+        // --- STATE ---
+        let model = null;
+        let isDetecting = false;
+        let systemState = 'STANDBY'; 
+        let autoMode = false;
+        let stealthMode = false;
+        let lastTap = 0;
+        let lastAutoSpeakTime = 0;
+        let pressTimer = null; 
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let wakeLock = null; 
+        let activeSource = null;
+        let loadingInterval = null; // For simulated progress
+        
+        const synth = window.speechSynthesis;
+        function speak(text, force = false) {
+            if (synth.speaking && !force) return;
+            if (force) synth.cancel();
+            let spokenText = text.replace(/Tuklas Guide/g, APP_NAME_PHONETIC);
+            const utter = new SpeechSynthesisUtterance(spokenText);
+            utter.rate = SPEECH_RATE;
+            utter.pitch = SPEECH_PITCH;
+            synth.speak(utter);
+            log([VOICE]: ${text});
+        }
+
+        function log(msg) {
+            consoleLog.innerHTML += <div>> ${msg}</div>;
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+
+        function updateProgress(percent, message) {
+            progressFill.style.width = percent + '%';
+            if (message) {
+                progressText.textContent = message;
+                // Don't speak every single percentage update, just the major messages
+                // We handle speaking in the main flow
+            }
+        }
+
+        // --- INIT LOAD ---
+        window.addEventListener('load', () => {
+             const savedIP = localStorage.getItem(STORAGE_KEY_IP);
+             if (savedIP) {
+                 ipInput.value = savedIP;
+                 log("Restored saved IP.");
+             }
+             setTimeout(() => speak(APP_NAME_PHONETIC + " Ready."), 1000);
+        });
+
+        async function requestWakeLock() {
+            if ('wakeLock' in navigator) {
+                try { wakeLock = await navigator.wakeLock.request('screen'); } catch (err) {}
+            }
+        }
+
+        function triggerFullScreen() {
+            const elem = document.documentElement;
+            if (elem.requestFullscreen) elem.requestFullscreen().catch(() => {});
+            else if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
+        }
+
+        function startWithIP() {
+            triggerFullScreen();
+            initializeSystem();
+        }
+
+        // --- GESTURES ---
+        touchLayer.addEventListener('touchstart', (e) => {
+            touchStartX = e.changedTouches[0].screenX;
+            touchStartY = e.changedTouches[0].screenY;
+            pressTimer = setTimeout(() => {
+                if(systemState === 'RUNNING') toggleAutoMode();
+            }, 1200); 
+        }, {passive: false});
+
+        touchLayer.addEventListener('touchmove', (e) => { clearTimeout(pressTimer); });
+
+        touchLayer.addEventListener('touchend', (e) => {
+            clearTimeout(pressTimer); 
+            const touchEndX = e.changedTouches[0].screenX;
+            const touchEndY = e.changedTouches[0].screenY;
+            const diffX = touchEndX - touchStartX;
+            const diffY = touchEndY - touchStartY;
+            const absDiffX = Math.abs(diffX);
+            const absDiffY = Math.abs(diffY);
+            const currentTime = new Date().getTime();
+            const tapLength = currentTime - lastTap;
+
+            if (absDiffX > 60 && absDiffX > absDiffY && diffX < 0) { handleGesture('SWIPE_LEFT'); return; }
+            if (absDiffY > 60 && absDiffY > absDiffX && diffY < 0) { handleGesture('SWIPE_UP'); return; }
+            
+            if (absDiffX < 20 && absDiffY < 20) { 
+                if (tapLength < 300 && tapLength > 0) {
+                    handleGesture('DOUBLE_TAP');
+                    lastTap = 0; 
+                } else {
+                    setTimeout(() => {
+                        if (new Date().getTime() - lastTap >= 300) handleGesture('SINGLE_TAP');
+                    }, 300);
+                    lastTap = currentTime;
+                }
+            }
+        });
+
+        function handleGesture(type) {
+            if (type === 'SWIPE_UP' && systemState === 'RUNNING') { toggleStealthMode(); return; }
+            if (type === 'SWIPE_LEFT') {
+                speak("Navigating back.", true);
+                setTimeout(() => window.history.back(), 500); return;
+            }
+            if (type === 'DOUBLE_TAP') {
+                if (systemState === 'STANDBY') {
+                    initializeSystem();
+                    triggerFullScreen();
+                } else if (systemState === 'RUNNING') {
+                    speak("Paused.", true);
+                    isDetecting = false;
+                    systemState = 'STANDBY';
+                    mainBanner.textContent = "PAUSED";
+                    startScreen.style.display = 'block';
+                    controlsGroup.style.display = 'flex'; // Show controls again
+                    loadingGroup.style.display = 'none'; // Hide loading
+                    if(activeSource === remoteImg) remoteImg.src = ""; 
+                    if(stealthMode) toggleStealthMode();
+                }
+                return;
+            }
+            if (type === 'SINGLE_TAP' && systemState === 'RUNNING') { announceCurrentScene(true); }
+        }
+
+        function toggleStealthMode() {
+            stealthMode = !stealthMode;
+            if (stealthMode) {
+                stealthLayer.style.display = 'block';
+                adminPanel.style.display = 'none'; 
+                speak("Display off.", true);
+                triggerFullScreen(); 
+            } else {
+                stealthLayer.style.display = 'none';
+                adminPanel.style.display = 'block'; 
+                speak("Display on.", true);
+            }
+        }
+
+        function toggleAutoMode() {
+            autoMode = !autoMode;
+            if(autoMode) {
+                speak("Auto Mode.", true);
+                modeIndicator.textContent = "AUTO";
+                modeIndicator.style.color = "cyan";
+            } else {
+                speak("Manual.", true);
+                modeIndicator.textContent = "MANUAL";
+                modeIndicator.style.color = "#00ff41";
+            }
+        }
+
+        function triggerPurgeManual() {
+            if (confirm("ADMIN: PURGE memory (Models & IP)?")) executePurge();
+        }
+        async function executePurge() {
+            speak("Purging...", true);
+            const models = await tf.io.listModels();
+            for (const key in models) await tf.io.removeModel(key);
+            localStorage.removeItem(STORAGE_KEY_IP);
+            setTimeout(() => window.location.reload(), 1000);
+        }
+
+        async function initializeSystem() {
+            // UI Transition
+            mainBanner.textContent = "INITIALIZING...";
+            controlsGroup.style.display = 'none';
+            loadingGroup.style.display = 'flex';
+            
+            speak("Initializing " + APP_NAME_PHONETIC, true);
+            updateProgress(5, "Booting Core...");
+            requestWakeLock();
+            
+            try {
+                // 1. SENSOR CONNECTION (5-30%)
+                updateProgress(10, "Accessing Sensors...");
+                speak("Connecting to vision sensors...", false);
+                
+                const ip = ipInput.value.trim();
+                if (ip.length > 0) {
+                    localStorage.setItem(STORAGE_KEY_IP, ip);
+                    log("Connecting to ESP32: " + ip);
+                    activeSource = remoteImg;
+                    const streamUrl = http://${ip}/stream; 
+                    remoteImg.onload = () => { log("ESP32 Feed Active"); };
+                    remoteImg.onerror = () => { speak("Connection failed.", true); log("ESP32 Error."); };
+                    remoteImg.src = streamUrl;
+                    video.style.display = 'none';
+                    remoteImg.style.display = 'block';
+                } else {
+                    log("Using Local Camera");
+                    activeSource = video;
+                    const stream = await navigator.mediaDevices.getUserMedia({
+                        video: { facingMode: 'environment' },
+                        audio: false
+                    });
+                    video.srcObject = stream;
+                    await new Promise(r => video.onloadedmetadata = r);
+                    remoteImg.style.display = 'none';
+                    video.style.display = 'block';
+                }
+                
+                updateProgress(30, "Sensors Connected");
+                speak("Sensors Online.", false);
+
+                // 2. MODEL LOADING (30-90%)
+                if (!model) {
+                    // Check if local exists first to change narration
+                    const savedModels = await tf.io.listModels();
+                    const hasLocal = !!savedModels[LOCAL_MODEL_URL];
+
+                    if (hasLocal) {
+                        speak("Loading neural network from memory...", false);
+                        updateProgress(40, "Loading from Storage...");
+                    } else {
+                        speak("Downloading neural network from cloud. This may take a moment...", false);
+                        updateProgress(40, "Downloading Model...");
+                    }
+
+                    // Start Simulated Progress (move from 40 to 90 over 3 seconds)
+                    let p = 40;
+                    loadingInterval = setInterval(() => {
+                        if(p < 90) {
+                            p += 2;
+                            updateProgress(p, hasLocal ? "Loading..." : "Downloading...");
+                        }
+                    }, 100);
+
+                    try {
+                        // Actual Load
+                        if (hasLocal) {
+                            model = await cocoSsd.load({ modelUrl: LOCAL_MODEL_URL });
+                        } else {
+                            model = await cocoSsd.load({ base: MODEL_BASE });
+                            // Save after download
+                            speak("Download complete. Saving to memory...", false);
+                            updateProgress(95, "Saving to Memory...");
+                            await model.model.save(LOCAL_MODEL_URL);
+                        }
+                    } catch (err) {
+                        // Retry logic if local failed, or just fallback
+                        console.error("Load failed, retrying download");
+                        clearInterval(loadingInterval);
+                        updateProgress(40, "Retrying Download...");
+                        model = await cocoSsd.load({ base: MODEL_BASE });
+                    }
+                    
+                    clearInterval(loadingInterval);
+                }
+
+                // 3. FINALIZATION (100%)
+                updateProgress(100, "System Ready");
+                speak("Neural Network Active. System Ready.", false);
+
+                systemState = 'RUNNING';
+                isDetecting = true;
+                modeIndicator.textContent = "MANUAL";
+                modeIndicator.style.color = "#00ff41";
+                startScreen.style.display = 'none'; 
+                
+                resize();
+                detectFrame();
+
+            } catch (e) {
+                clearInterval(loadingInterval);
+                speak("Critical System Error.", true);
+                updateProgress(0, "ERROR: " + e.message);
+                log("Error: " + e.message);
+                // Allow retry
+                setTimeout(() => {
+                    mainBanner.textContent = "SYSTEM READY";
+                    controlsGroup.style.display = 'flex';
+                    loadingGroup.style.display = 'none';
+                }, 3000);
+            }
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        window.addEventListener('resize', resize);
+
+        async function detectFrame() {
+            if (!isDetecting) return;
+            if(autoMode) {
+                const now = Date.now();
+                if(now - lastAutoSpeakTime > AUTO_ANNOUNCE_INTERVAL) {
+                    announceCurrentScene(false); 
+                    lastAutoSpeakTime = now;
+                }
+            }
+
+            if (model && activeSource) {
+                let ready = false;
+                if(activeSource === video && video.readyState === 4) ready = true;
+                if(activeSource === remoteImg && remoteImg.complete && remoteImg.naturalWidth > 0) ready = true;
+
+                if (ready) {
+                    try {
+                        const predictions = await model.detect(activeSource, 20, DETECTION_THRESHOLD);
+                        if (!stealthMode) {
+                            ctx.clearRect(0, 0, canvas.width, canvas.height);
+                            drawAndTrack(predictions);
+                        } else {
+                            window.currentPredictions = predictions;
+                        }
+                    } catch(err) { console.log("Frame skip"); }
+                }
+            }
+            if (document.hidden) setTimeout(detectFrame, 500); 
+            else requestAnimationFrame(detectFrame);
+        }
+
+        function drawAndTrack(predictions) {
+            let srcW = 0, srcH = 0;
+            if(activeSource === video) { srcW = video.videoWidth; srcH = video.videoHeight; }
+            else { srcW = remoteImg.naturalWidth; srcH = remoteImg.naturalHeight; }
+
+            const scaleX = canvas.width / srcW;
+            const scaleY = canvas.height / srcH;
+            
+            predictions.forEach(pred => {
+                const [x, y, w, h] = pred.bbox;
+                const sx = x * scaleX; const sy = y * scaleY;
+                const sw = w * scaleX; const sh = h * scaleY;
+                ctx.strokeStyle = '#00ff41'; ctx.lineWidth = 2;
+                ctx.strokeRect(sx, sy, sw, sh);
+                ctx.fillStyle = 'rgba(0,255,65,0.2)';
+                ctx.fillText(${pred.class} ${Math.round(pred.score*100)}%, sx, sy > 10 ? sy - 5 : 10);
+            });
+            window.currentPredictions = predictions;
+        }
+
+        function announceCurrentScene(force = false) {
+            if (!window.currentPredictions || window.currentPredictions.length === 0) {
+                if(force) speak("Clear.", true); return;
+            }
+            let srcW = 0;
+            if(activeSource === video) srcW = video.videoWidth;
+            else srcW = remoteImg.naturalWidth;
+            const groupings = {}; 
+            window.currentPredictions.forEach(obj => {
+                const centerX = obj.bbox[0] + (obj.bbox[2] / 2);
+                let pos = "center";
+                if (centerX < srcW * 0.33) pos = "left";
+                else if (centerX > srcW * 0.66) pos = "right";
+                const key = ${obj.class}|${pos};
+                groupings[key] = (groupings[key] || 0) + 1;
+            });
+            let sentence = "";
+            const keys = Object.keys(groupings).slice(0, 3); 
+            keys.forEach(key => {
+                const [cls, pos] = key.split('|');
+                const count = groupings[key];
+                const label = count > 1 ? cls + "s" : cls; 
+                sentence += ${count} ${label} ${pos}. ;
+            });
+            speak(sentence, force);
+        }
+    </script>
+</body>
+</html>
