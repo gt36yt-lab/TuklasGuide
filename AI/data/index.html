@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-CAM Gemini Vision</title>
+    <style>
+        /* (CSS is unchanged) */
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 20px; background-color: #f0f2f5; text-align: center; color: #333; }
+        .container { background-color: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; max-width: 640px; width: 90%; }
+        h1, h2 { color: #4a00b3; }
+        h2 { margin-top: 30px; margin-bottom: 10px; border-top: 1px solid #eee; padding-top: 20px;}
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; margin: 8px 5px; border-radius: 6px; cursor: pointer; font-size: 16px; transition: background-color 0.3s ease; }
+        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        .vision-button { background-color: #6f42c1; }
+        #camera-container { margin-top: 15px; border: 1px solid #ccc; border-radius: 8px; min-height: 240px; background-color: #000; display: flex; align-items: center; justify-content: center; }
+        #camera-stream { max-width: 100%; border-radius: 5px; }
+        #chatResponses { margin-top: 15px; text-align: left; background-color: #f8f9fa; padding: 15px; border-radius: 8px; min-height: 50px; border: 1px solid #dee2e6; max-height: 300px; overflow-y: auto;}
+        #chatResponses p { margin: 8px 0; padding: 10px; border-radius: 6px; line-height: 1.4; word-wrap: break-word; }
+        .error-reply { background-color: #f8d7da; color: #721c24; }
+        .ai-vision-reply { background-color: #e9d8fd; color: #3d1a78; font-style: italic; }
+        .system-message { background-color: #d1ecf1; color: #0c5460; }
+        .user-prompt { background-color: #d4edda; color: #155724; text-align: right; margin-left: 20%; }
+        .controls-group { display: flex; justify-content: center; align-items: center; gap: 10px; margin-top: 10px;}
+        .switch { position: relative; display: inline-block; width: 60px; height: 34px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 34px; }
+        .slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #28a745; }
+        input:checked + .slider:before { transform: translateX(26px); }
+        .text-input { padding: 8px; font-size: 16px; border-radius: 6px; border: 1px solid #ccc; flex-grow: 1; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ESP32-CAM Gemini Vision</h1>
+        <h2>Live Camera Feed</h2>
+        <div id="camera-container"><img id="camera-stream" src="" alt="Live stream starting..."></div>
+        
+        <h2>Interaction History</h2>
+        <div id="chatResponses"></div>
+
+        <!-- *** LEGENDARY LAYOUT CHANGE: Autonomous controls are now above Conversational *** -->
+        <h2>Autonomous & On-Demand AI</h2>
+        <div class="controls-group">
+            <label>Interval (sec):</label> <input type="number" id="intervalInput" value="15" min="10" style="width: 60px;">
+            <label class="switch"><input type="checkbox" id="autoDescribeToggle" onchange="toggleAutoDescribe()"><span class="slider"></span></label>
+            <span>Auto</span>
+            <button id="describeOnceButton" class="vision-button" onclick="describeSceneOnce()">Describe Scene</button>
+        </div>
+
+        <h2>Conversational AI</h2>
+        <div class="controls-group">
+             <input type="text" id="personaInput" class="text-input" placeholder="Set AI Persona (e.g., You are a pirate)">
+        </div>
+        <div class="controls-group">
+            <input type="text" id="promptInput" class="text-input" placeholder="Ask a question about the image...">
+            <button id="sendPromptButton" onclick="sendManualPrompt()">Ask</button>
+        </div>
+
+        <h2>Device Control</h2>
+        <div class="controls-group">
+            <button onclick="controlLED('on')">Flash ON</button>
+            <button onclick="controlLED('off')">Flash OFF</button>
+            <div id="status" style="font-weight: bold; margin-left: 10px;">Status: Unknown</div>
+        </div>
+    </div>
+
+    <script>
+        const streamImg = document.getElementById('camera-stream');
+        const chatResponsesDiv = document.getElementById('chatResponses');
+        const personaInput = document.getElementById('personaInput');
+        const promptInput = document.getElementById('promptInput');
+        const sendPromptButton = document.getElementById('sendPromptButton');
+        const autoDescribeToggle = document.getElementById('autoDescribeToggle');
+        const intervalInput = document.getElementById('intervalInput');
+        const describeOnceButton = document.getElementById('describeOnceButton');
+
+        let isStreaming = false;
+        let autoDescribeIntervalId = null;
+
+        window.onload = () => { getStatus(); startStream(); };
+        function startStream() { if (!isStreaming) { streamImg.src = '/stream?_t=' + new Date().getTime(); isStreaming = true; } }
+        function stopStream() { if (isStreaming) { streamImg.src = ''; isStreaming = false; } }
+
+        function sendManualPrompt() {
+            const persona = personaInput.value.trim();
+            const prompt = promptInput.value.trim();
+            if (!prompt) { addMessageToChat("Please enter a question.", "error-reply"); return; }
+            addMessageToChat("You: " + prompt, "user-prompt");
+            promptInput.value = "";
+            runAnalysis(persona, prompt, 'manual');
+        }
+        
+        // --- LEGENDARY LOGIC FIX: "Describe Scene" now respects the current persona ---
+        function describeSceneOnce() {
+            // Get the current persona from the input box.
+            const persona = personaInput.value.trim();
+            // Call the analysis with the persona, but a default prompt.
+            runAnalysis(persona, null, 'oneshot');
+        }
+        
+        function runAnalysis(persona, prompt, runType) {
+            switch(runType) {
+                case 'manual': sendPromptButton.disabled = true; addMessageToChat("Thinking...", "system-message", true); break;
+                case 'oneshot': describeOnceButton.disabled = true; addMessageToChat("Describing scene...", "system-message", true); break;
+                case 'auto': addMessageToChat("Auto-analyzing...", "system-message", true); break;
+            }
+            stopStream();
+            setTimeout(() => {
+                fetch('/describe-image', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        persona: persona || "You are a helpful assistant.",
+                        prompt: prompt || "Describe this image concisely."
+                    })
+                })
+                .then(response => response.ok ? response.json() : response.text().then(text => Promise.reject(new Error(text))))
+                .then(data => { updateLastMessage("Vision AI: " + data.reply, "ai-vision-reply"); })
+                .catch(error => { updateLastMessage("AI Error: " + error.message, "error-reply"); })
+                .finally(() => {
+                    if (runType === 'manual') sendPromptButton.disabled = false;
+                    if (runType === 'oneshot') describeOnceButton.disabled = false;
+                    startStream(); 
+                });
+            }, 500);
+        }
+
+        function toggleAutoDescribe() {
+            if (autoDescribeToggle.checked) {
+                const intervalSeconds = parseInt(intervalInput.value, 10);
+                if (isNaN(intervalSeconds) || intervalSeconds < 10) { addMessageToChat("Error: Interval must be >= 10 seconds.", "error-reply"); autoDescribeToggle.checked = false; return; }
+                const intervalMilliseconds = intervalSeconds * 1000;
+                if(autoDescribeIntervalId) clearInterval(autoDescribeIntervalId);
+                addMessageToChat(`Auto-analysis enabled. Interval: ${intervalSeconds} seconds.`, "system-message");
+                const autoPersona = () => personaInput.value.trim();
+                runAnalysis(autoPersona(), null, 'auto');
+                autoDescribeIntervalId = setInterval(() => runAnalysis(autoPersona(), null, 'auto'), intervalMilliseconds);
+                intervalInput.disabled = true; personaInput.disabled = true; describeOnceButton.disabled = true; sendPromptButton.disabled = true;
+            } else {
+                if (autoDescribeIntervalId) {
+                    clearInterval(autoDescribeIntervalId); autoDescribeIntervalId = null;
+                    addMessageToChat("Auto-analysis disabled.", "system-message");
+                    intervalInput.disabled = false; personaInput.disabled = false; describeOnceButton.disabled = false; sendPromptButton.disabled = false;
+                }
+            }
+        }
+        
+        function controlLED(state) { stopStream(); setTimeout(() => { fetch('/led/' + state, { method: 'POST' }).then(response => response.ok ? response.json() : Promise.reject('Failed')).then(data => getStatus()).catch(error => console.error('Error', error)).finally(() => { startStream(); }); }, 250); }
+        function getStatus() { fetch('/status').then(response => response.ok ? response.json() : Promise.reject('Failed')).then(data => document.getElementById('status').textContent = 'Status: ' + data.status).catch(error => console.error('Error', error)); }
+        function addMessageToChat(message, className, isThinking = false) { const p = document.createElement('p'); p.className = className; p.textContent = message; if(isThinking) p.id = 'thinking-message'; chatResponsesDiv.appendChild(p); chatResponsesDiv.scrollTop = chatResponsesDiv.scrollHeight; }
+        function updateLastMessage(message, className) { const p = document.getElementById('thinking-message'); if (p) { p.textContent = message; p.className = className; p.id = ''; } else { addMessageToChat(message, className); } }
+    </script>
+</body>
+</html>
